@@ -1,25 +1,37 @@
 #!/usr/bin/env python3
 """
 Environment configuration file
-Load this to set all environment variables
+Load this to set all environment variables from .env file
 """
 
 import os
+from dotenv import load_dotenv
 
-# Set environment variables
-os.environ["GEMINI_API_KEY"] = "AIzaSyCxrA2E-qBw0IPjeWhFdNHw9ti-x5CB7FY"
-os.environ["GEMINI_MODEL"] = "gemini-1.5-flash"
+# Load environment variables from .env file
+load_dotenv()
 
-# MySQL Database Configuration
-os.environ["MYSQL_HOST"] = "localhost"
-os.environ["MYSQL_PORT"] = "3306"
-os.environ["MYSQL_USER"] = "root"
-os.environ["MYSQL_PASSWORD"] = ""
-os.environ["MYSQL_DATABASE"] = "oratio"
+# Verify that required environment variables are loaded
+required_vars = [
+    "GEMINI_API_KEY",
+    "GEMINI_MODEL", 
+    "MYSQL_HOST",
+    "MYSQL_PORT",
+    "MYSQL_USER",
+    "MYSQL_PASSWORD",
+    "MYSQL_DATABASE",
+    "SECRET_KEY",
+    "ACCESS_TOKEN_EXPIRE_MINUTES"
+]
 
-# Security
-os.environ["SECRET_KEY"] = "your-secret-key-change-in-production"
-os.environ["ACCESS_TOKEN_EXPIRE_MINUTES"] = "30"
+missing_vars = []
+for var in required_vars:
+    if os.getenv(var) is None:
+        missing_vars.append(var)
+
+if missing_vars:
+    print(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
+    print("Please check your .env file and ensure all required variables are set.")
+    exit(1)
 
 print("✅ Environment variables loaded successfully!")
 print(f"GEMINI_API_KEY: {'*' * 20}...{os.environ['GEMINI_API_KEY'][-4:]}")
