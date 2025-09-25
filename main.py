@@ -59,6 +59,16 @@ class UserModel(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
 
+class ChatHistoryModel(Base):
+    __tablename__ = "chat_history"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    original_text = Column(String(5000), nullable=False)
+    analysis_result = Column(String(10000), nullable=False)  # JSON string
+    created_at = Column(DateTime, default=datetime.utcnow)
+    provider_used = Column(String(50), nullable=False)  # "gemini" or "groq"
+
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
@@ -89,6 +99,17 @@ class AnalyzeResponse(BaseModel):
     original_text: str
     summary: Dict[str, Any]
     sentences: List[SentenceAnalysis]
+
+class ChatHistoryItem(BaseModel):
+    id: int
+    original_text: str
+    analysis_result: Dict[str, Any]
+    created_at: datetime
+    provider_used: str
+
+class ChatHistoryResponse(BaseModel):
+    history: List[ChatHistoryItem]
+    total_count: int
 
 def init_database():
     """Initialize MySQL database with users table"""
@@ -530,7 +551,7 @@ def analyze_text_with_gemini(text: str) -> Dict[str, Any]:
             )
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze_text(request: AnalyzeRequest, current_user: User = Depends(get_current_user)):
+async def analyze_text(request: AnalyzeRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Analyze text for bias using AI with automatic fallback"""
     text = request.text.strip()
     if not text:
@@ -585,7 +606,8 @@ async def analyze_text(request: AnalyzeRequest, current_user: User = Depends(get
     # Calculate bias score
     bias_score = min(total_biased_count / len(sentences), 1.0) if sentences else 0.0
     
-    return AnalyzeResponse(
+    # Create response
+    response = AnalyzeResponse(
         original_text=text,
         summary={
             "biased_count": total_biased_count,
@@ -593,6 +615,24 @@ async def analyze_text(request: AnalyzeRequest, current_user: User = Depends(get
         },
         sentences=sentence_analyses
     )
+    
+    # Save to chat history
+    try:
+        global current_provider
+        chat_history = ChatHistoryModel(
+            user_id=current_user.id,
+            original_text=text,
+            analysis_result=json.dumps(response.dict()),
+            provider_used=current_provider
+        )
+        db.add(chat_history)
+        db.commit()
+        print(f"✅ Chat history saved for user {current_user.id}")
+    except Exception as e:
+        print(f"⚠️ Failed to save chat history: {e}")
+        # Don't fail the request if history saving fails
+    
+    return response
 
 @app.get("/status")
 async def get_status():
@@ -608,6 +648,112 @@ async def get_status():
     }
     
     return status_info
+
+@app.get("/chat/history", response_model=ChatHistoryResponse)
+async def get_chat_history(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    limit: int = 50,
+    offset: int = 0
+):
+    """Get user's chat history"""
+    try:
+        # Get chat history for the user
+        history_query = db.query(ChatHistoryModel).filter(
+            ChatHistoryModel.user_id == current_user.id
+        ).order_by(ChatHistoryModel.created_at.desc())
+        
+        # Get total count
+        total_count = history_query.count()
+        
+        # Apply pagination
+        history_items = history_query.offset(offset).limit(limit).all()
+        
+        # Convert to response format
+        history_response = []
+        for item in history_items:
+            try:
+                analysis_result = json.loads(item.analysis_result)
+            except json.JSONDecodeError:
+                analysis_result = {"error": "Failed to parse analysis result"}
+            
+            history_response.append(ChatHistoryItem(
+                id=item.id,
+                original_text=item.original_text,
+                analysis_result=analysis_result,
+                created_at=item.created_at,
+                provider_used=item.provider_used
+            ))
+        
+        return ChatHistoryResponse(
+            history=history_response,
+            total_count=total_count
+        )
+        
+    except Exception as e:
+        print(f"Error retrieving chat history: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve chat history"
+        )
+
+@app.delete("/chat/history/{history_id}")
+async def delete_chat_history_item(
+    history_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a specific chat history item"""
+    try:
+        # Find the history item
+        history_item = db.query(ChatHistoryModel).filter(
+            ChatHistoryModel.id == history_id,
+            ChatHistoryModel.user_id == current_user.id
+        ).first()
+        
+        if not history_item:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Chat history item not found"
+            )
+        
+        # Delete the item
+        db.delete(history_item)
+        db.commit()
+        
+        return {"message": "Chat history item deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting chat history item: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete chat history item"
+        )
+
+@app.delete("/chat/history")
+async def clear_chat_history(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Clear all chat history for the current user"""
+    try:
+        # Delete all history items for the user
+        deleted_count = db.query(ChatHistoryModel).filter(
+            ChatHistoryModel.user_id == current_user.id
+        ).delete()
+        
+        db.commit()
+        
+        return {"message": f"Cleared {deleted_count} chat history items"}
+        
+    except Exception as e:
+        print(f"Error clearing chat history: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clear chat history"
+        )
 
 if __name__ == "__main__":
     import uvicorn

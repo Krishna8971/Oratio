@@ -4,22 +4,22 @@ import MessageInput from "./MessageInput";
 
 interface ChatProps {
     onResult: (result: AnalyzeResponse) => void;
+    onAnalysisComplete?: () => void;
 }
 
-export default function Chat({ onResult }: ChatProps) {
+export default function Chat({ onResult, onAnalysisComplete }: ChatProps) {
     const [messages, setMessages] = useState<{ role: "user" | "system"; content: string }[]>([]);
     const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
 
     async function handleSend(text: string) {
         const newMessages: { role: "user" | "system"; content: string }[] = [...messages, { role: "user", content: text }];
         setMessages(newMessages);
         setLoading(true);
-        setError(null);
         
         try {
             const res = await analyzeText({ text });
             onResult(res);
+            onAnalysisComplete?.(); // Trigger history refresh
         } catch (e: any) {
             console.error("Analysis error:", e);
             let errorMessage = "Analysis failed";
@@ -38,7 +38,6 @@ export default function Chat({ onResult }: ChatProps) {
                 errorMessage = e.message;
             }
             
-            setError(errorMessage);
             setMessages(prev => [...prev, { role: "system", content: `Error: ${errorMessage}` }]);
         } finally {
             setLoading(false);
