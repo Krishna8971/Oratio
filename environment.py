@@ -8,7 +8,7 @@ import os
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv()
+load_dotenv('.env')
 
 # Verify that required environment variables are loaded
 required_vars = [
@@ -21,6 +21,11 @@ required_vars = [
     "MYSQL_DATABASE",
     "SECRET_KEY",
     "ACCESS_TOKEN_EXPIRE_MINUTES"
+]
+
+# Optional vars (fallback APIs)
+optional_vars = [
+    "GROQ_API_KEY"
 ]
 
 missing_vars = []

@@ -17,6 +17,7 @@ except ImportError:
     print("⚠️ environment.py not found, using system environment variables")
 
 import google.generativeai as genai
+from groq import Groq
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +31,9 @@ from passlib.context import CryptContext
 # Configuration
 from config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, ALLOWED_ORIGINS, DATABASE_URL, GEMINI_API_KEY, GEMINI_MODEL
 
+# Get Groq API key from environment
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
@@ -39,8 +43,11 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Global Gemini model
+# Global models for fallback system
 gemini_model = None
+groq_client = None
+current_provider = "gemini"  # Track which provider is currently active
+gemini_quota_exceeded = False  # Track if Gemini quota is exceeded
 
 # Database Models
 class UserModel(Base):
@@ -148,39 +155,85 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize Gemini API on startup"""
-    global gemini_model
+    """Initialize AI APIs with fallback system"""
+    global gemini_model, groq_client, current_provider, gemini_quota_exceeded
     
-    print("Initializing Gemini API...")
-    print("=" * 50)
+    print("Initializing AI APIs with fallback system...")
+    print("=" * 60)
     
+    # Initialize Gemini API
+    print("🤖 Initializing Gemini API...")
     try:
         if not GEMINI_API_KEY:
             print("❌ GEMINI_API_KEY not found in environment variables")
-            print("Please set GEMINI_API_KEY environment variable")
             raise ValueError("GEMINI_API_KEY is required")
         
-        # Configure Gemini API
         genai.configure(api_key=GEMINI_API_KEY)
-        
-        # Initialize the model
         gemini_model = genai.GenerativeModel(GEMINI_MODEL)
         
-        # Test the connection
-        test_response = gemini_model.generate_content("Hello, this is a test.")
-        print(f"✅ Gemini API initialized successfully")
-        print(f"Model: {GEMINI_MODEL}")
-        print(f"Test response: {test_response.text[:50]}...")
+        # Test Gemini connection
+        try:
+            test_response = gemini_model.generate_content("Hello, this is a test.")
+            print(f"✅ Gemini API initialized successfully")
+            print(f"Model: {GEMINI_MODEL}")
+            print(f"Test response: {test_response.text[:50]}...")
+        except Exception as test_error:
+            if "quota" in str(test_error).lower() or "429" in str(test_error):
+                print(f"⚠️ Gemini API initialized but quota exceeded")
+                print(f"Model: {GEMINI_MODEL}")
+                gemini_quota_exceeded = True
+            else:
+                print(f"⚠️ Gemini API initialized but test failed: {test_error}")
+                print(f"Model: {GEMINI_MODEL}")
         
     except Exception as e:
         print(f"❌ Error initializing Gemini API: {e}")
-        print("\nPlease make sure:")
-        print("1. GEMINI_API_KEY is set correctly")
-        print("2. You have access to Google AI Studio")
-        print("3. Your API key has the necessary permissions")
-        gemini_model = None
+        if "quota" in str(e).lower() or "429" in str(e):
+            print("⚠️ Quota exceeded - will use fallback when available")
+            gemini_quota_exceeded = True
+        else:
+            print("❌ Gemini API failed to initialize")
+            gemini_model = None
     
-    print("=" * 50)
+    # Initialize Groq API (fallback)
+    print("\n🚀 Initializing Groq API (fallback)...")
+    try:
+        if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
+            print("⚠️ GROQ_API_KEY not set - fallback will not be available")
+            print("Set GROQ_API_KEY in .env file to enable fallback")
+        else:
+            groq_client = Groq(api_key=GROQ_API_KEY)
+            
+            # Test Groq connection
+            try:
+                test_response = groq_client.chat.completions.create(
+                    messages=[{"role": "user", "content": "Hello, this is a test."}],
+                    model="llama-3.1-8b-instant",
+                    max_tokens=10
+                )
+                print(f"✅ Groq API initialized successfully")
+                print(f"Model: llama-3.1-8b-instant")
+                print(f"Test response: {test_response.choices[0].message.content[:50]}...")
+            except Exception as test_error:
+                print(f"⚠️ Groq API initialized but test failed: {test_error}")
+                print("Fallback will be attempted but may not work")
+        
+    except Exception as e:
+        print(f"❌ Error initializing Groq API: {e}")
+        groq_client = None
+    
+    # Determine active provider
+    if gemini_model and not gemini_quota_exceeded:
+        current_provider = "gemini"
+        print(f"\n🎯 Active provider: Gemini ({GEMINI_MODEL})")
+    elif groq_client:
+        current_provider = "groq"
+        print(f"\n🎯 Active provider: Groq (llama-3.1-8b-instant)")
+    else:
+        current_provider = "none"
+        print(f"\n❌ No AI providers available!")
+    
+    print("=" * 60)
     
     yield
     
@@ -254,6 +307,135 @@ async def login(user_data: UserLogin, db: Session = Depends(get_db)):
 async def get_me(current_user: User = Depends(get_current_user)):
     """Get current user information"""
     return current_user
+
+def analyze_text_with_groq(text: str) -> Dict[str, Any]:
+    """Analyze text for bias using Groq API (fallback)"""
+    if not groq_client:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Groq API not available"
+        )
+    
+    # Create a comprehensive prompt for bias detection
+    prompt = f"""
+    Analyze the following text for bias and provide a detailed analysis in JSON format.
+
+    Text to analyze: "{text}"
+
+    Please provide your analysis in the following JSON format:
+    {{
+        "biased_count": <number of biased elements found>,
+        "score": <overall bias score from 0.0 to 1.0>,
+        "sentences": [
+            {{
+                "sentence": "<the sentence>",
+                "biased_spans": [
+                    {{
+                        "text": "<biased text>",
+                        "start": <start position>,
+                        "end": <end position>,
+                        "type": "<bias type: gender_bias, racial_bias, ageist, ableist, religious_bias, etc.>"
+                    }}
+                ],
+                "suggestion": "<neutral alternative>"
+            }}
+        ]
+    }}
+
+    Guidelines for bias detection:
+    1. Look for gender bias (stereotypes about men/women abilities)
+    2. Look for racial/ethnic bias
+    3. Look for ageist language (discrimination based on age)
+    4. Look for ableist language (discrimination against disabilities)
+    5. Look for religious bias
+    6. Look for socioeconomic bias
+    7. Look for toxic or offensive language
+    8. Look for stereotyping or generalizations
+
+    Provide neutral, inclusive alternatives for any biased language found.
+    If no bias is found, set biased_count to 0 and score to 0.0.
+    """
+    
+    try:
+        response = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            max_tokens=2000,
+            temperature=0.1
+        )
+        
+        # Parse the JSON response
+        response_text = response.choices[0].message.content.strip()
+        
+        # Try to extract JSON from the response
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        if json_match:
+            analysis = json.loads(json_match.group())
+            return analysis
+        else:
+            # Fallback if JSON parsing fails
+            return {
+                "biased_count": 0,
+                "score": 0.0,
+                "sentences": [{
+                    "sentence": text,
+                    "biased_spans": [],
+                    "suggestion": text
+                }]
+            }
+    except Exception as e:
+        print(f"Groq API error: {e}")
+        error_str = str(e)
+        if "quota" in error_str.lower() or "429" in error_str:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Groq API quota exceeded. Please try again later."
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error analyzing text with Groq: {error_str}"
+            )
+
+def analyze_text_with_fallback(text: str) -> Dict[str, Any]:
+    """Analyze text with automatic fallback between Gemini and Groq"""
+    global current_provider, gemini_quota_exceeded
+    
+    # Try Gemini first if available and quota not exceeded
+    if current_provider == "gemini" and gemini_model and not gemini_quota_exceeded:
+        try:
+            return analyze_text_with_gemini(text)
+        except Exception as e:
+            error_str = str(e)
+            if "quota" in error_str.lower() or "429" in error_str:
+                print("🔄 Gemini quota exceeded, switching to Groq fallback...")
+                gemini_quota_exceeded = True
+                current_provider = "groq"
+                # Fall through to try Groq
+            else:
+                print(f"❌ Gemini error: {e}")
+                # Fall through to try Groq
+    
+    # Try Groq if available
+    if current_provider == "groq" and groq_client:
+        try:
+            return analyze_text_with_groq(text)
+        except Exception as e:
+            print(f"❌ Groq error: {e}")
+            # If Groq also fails, try to fall back to Gemini if quota reset
+            if gemini_model and not gemini_quota_exceeded:
+                print("🔄 Trying Gemini again...")
+                current_provider = "gemini"
+                try:
+                    return analyze_text_with_gemini(text)
+                except Exception as gemini_error:
+                    print(f"❌ Gemini still failing: {gemini_error}")
+    
+    # If both fail, return error
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="All AI providers are currently unavailable. Please try again later."
+    )
 
 def analyze_text_with_gemini(text: str) -> Dict[str, Any]:
     """Analyze text for bias using Gemini API"""
@@ -335,14 +517,21 @@ def analyze_text_with_gemini(text: str) -> Dict[str, Any]:
         }
     except Exception as e:
         print(f"Gemini API error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error analyzing text: {str(e)}"
-        )
+        error_str = str(e)
+        if "quota" in error_str.lower() or "429" in error_str:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="API quota exceeded. Please try again later when your quota resets."
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error analyzing text: {error_str}"
+            )
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_text(request: AnalyzeRequest, current_user: User = Depends(get_current_user)):
-    """Analyze text for bias using Gemini API"""
+    """Analyze text for bias using AI with automatic fallback"""
     text = request.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
@@ -362,8 +551,8 @@ async def analyze_text(request: AnalyzeRequest, current_user: User = Depends(get
             continue
         
         try:
-            # Analyze each sentence with Gemini
-            analysis = analyze_text_with_gemini(sentence)
+            # Analyze each sentence with fallback system
+            analysis = analyze_text_with_fallback(sentence)
             
             # Extract sentence analysis
             sentence_data = analysis.get("sentences", [{}])[0] if analysis.get("sentences") else {}
@@ -404,6 +593,21 @@ async def analyze_text(request: AnalyzeRequest, current_user: User = Depends(get
         },
         sentences=sentence_analyses
     )
+
+@app.get("/status")
+async def get_status():
+    """Get current AI provider status"""
+    global current_provider, gemini_quota_exceeded
+    
+    status_info = {
+        "current_provider": current_provider,
+        "gemini_available": gemini_model is not None,
+        "gemini_quota_exceeded": gemini_quota_exceeded,
+        "groq_available": groq_client is not None,
+        "fallback_enabled": groq_client is not None
+    }
+    
+    return status_info
 
 if __name__ == "__main__":
     import uvicorn
