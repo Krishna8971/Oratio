@@ -1,0 +1,8 @@
+.auth-layout { min-height: 100vh; display: flex; flex-direction: column; }
+.auth-card { margin: 48px auto; width: 360px; background: #0b0b0b; border: 1px solid #222; padding: 24px; border-radius: 16px; display: flex; flex-direction: column; gap: 12px; }
+.auth-card h1 { margin: 0 0 8px; }
+.auth-card label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.auth-card input { background: #111; border: 1px solid #333; color: #fff; padding: 10px 12px; border-radius: 10px; }
+.auth-card .error { color: #ff6b6b; }
+
+
